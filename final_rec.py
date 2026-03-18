@@ -6,6 +6,15 @@ import os
 from Crypto.Cipher import AES
 from Crypto.Protocol.KDF import PBKDF2
 
+def recv_exact(sock, n):
+    data = b""
+    while len(data) < n:
+        chunk = sock.recv(n - len(data))
+        if not chunk:
+            raise ConnectionError("Connection lost")
+        data += chunk
+    return data
+
 # Preset authentication code
 PRESET_CODE = "CN_SECURE_1234"
 
@@ -36,8 +45,9 @@ def receive_file(client, save_dir="."):
     print(f"\n⬇ Receiving file: {filename} ({file_size} bytes)")
 
     # Receive the salt and nonce
-    salt = client.recv(16)
-    nonce = client.recv(16)
+    salt = recv_exact(client, 16)
+    nonce = recv_exact(client, 16)
+    tag = recv_exact(client, 16)
 
     # Get password for this specific file
     password = input(f"Enter password for decrypting {filename}: ").strip().encode()
@@ -66,7 +76,7 @@ def receive_file(client, save_dir="."):
 
     try:
         # Try to decrypt
-        decrypted_data = cipher.decrypt(file_bytes)
+        decrypted_data = cipher.decrypt_and_verify(file_bytes,tag)
 
         # Save the file
         save_path = os.path.join(save_dir, "received_" + filename)
@@ -74,9 +84,8 @@ def receive_file(client, save_dir="."):
             f.write(decrypted_data)
         print(f"✅ File received and saved successfully to {save_path}")
         return True
-    except Exception as e:
-        print(f"❌ Decryption error: {e}")
-        print("This could be due to an incorrect password.")
+    except ValueError:
+        print("❌ File tampered or wrong password!")
         return False
 
 
