@@ -1,0 +1,10 @@
+[project]
+name = "p2p-file-transfer"
+version = "0.1.0"
+description = "This was our CN project. Now we aim to make it a reusable library for anyone who wants to implement a simple p2p file transfer system."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pycryptodome",
+    "tqdm"
+]

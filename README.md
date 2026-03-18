@@ -1,65 +1,166 @@
 # 🔐 CN Secure File Transfer
 
-This project is a **Computer Networks (CN)** course project that implements **secure file transfer** from one machine to another over a network using **AES encryption**.
+This project is a Computer Networks (CN) course project that implements secure file transfer between machines over TCP with AES-based encryption.
 
-It uses a **client-server model**, with:
-- `final_sender.py`: the client script (sender)
-- `final_rec.py`: the server script (receiver)
+## Part 1: Legacy Implementation (Old Code)
 
-## ✨ Features
+The scripts `final_sender.py` and `final_rec.py` are now considered the old/legacy implementation, and their position in the project has changed over time as the project evolves.
 
-- 📡 **Port-to-port transfer** over TCP sockets
-- 🔐 **AES encryption (EAX mode)** for confidentiality
-- 🧂 **PBKDF2-based key derivation** using user passwords and random salts
-- 🧾 **File metadata exchange** (filename, size)
-- 📥 Real-time progress bar via `tqdm`
-- ✅ Basic authentication before receiving files
-- 📁 Save received files with custom directory options
+### Legacy Scripts
 
-## 📂 Project Structure
-```
-.
-├── final_sender.py
-├── final_rec.py
-└── (other files)
-```
+- `final_sender.py`: legacy client script (sender)
+- `final_rec.py`: legacy server script (receiver)
 
-## ⚙️ Requirements
+### Legacy Features
 
-Install dependencies using:
+- Port-to-port transfer over TCP sockets
+- AES encryption (EAX mode)
+- PBKDF2-based key derivation with random salt
+- File metadata exchange (filename and size)
+- Progress bar with tqdm
+- Preset code authentication before receiving files
+- Custom destination directory support on receiver side
+
+### Requirements
+
+Install dependencies:
 
 ```bash
 pip install pycryptodome tqdm
 ```
 
-## 🚀 Usage
+### Usage (Legacy Scripts)
 
-1. **Start the Receiver**  
-   On the receiving machine:  
-   ```bash
-   python final_rec.py
-   ```  
-   Enter the preset code: `CN_SECURE_1234`  
-   Choose IP address, port (default: 9999), and destination folder.
+1. Start the receiver on the receiving machine:
 
-2. **Start the Sender**  
-   On the sending machine:  
-   ```bash
-   python final_sender.py
-   ```  
-   Provide receiver’s IP and port.  
-   Choose a file to send.  
-   Enter a unique password for each file (used for encryption).
+```bash
+python final_rec.py
+```
 
-🔁 You can send/receive multiple files in a session.
+Enter the preset code `CN_SECURE_1234`, then choose listening IP, port (default 9999), and output directory.
 
-## 🔒 Security Details
+2. Start the sender on the sending machine:
 
-- AES EAX mode ensures both encryption and authentication.
-- Random salt & nonce are used per file for added security.
-- PBKDF2 ensures strong key derivation from weak user passwords.
+```bash
+python final_sender.py
+```
 
-## 📌 Notes
+Provide receiver IP and port, choose a file, and enter the password used for encryption.
 
-Make sure sender and receiver machines are on the same network or connected via port forwarding.  
-The receiver must enter the same password used by the sender to successfully decrypt the file.
+You can send/receive multiple files in a session.
+
+### Notes for Legacy Flow
+
+- Sender and receiver should be on the same network (or reachable through proper port forwarding).
+- Receiver must use the same password entered on sender side for successful decryption.
+
+## Part 2: Future Work Roadmap
+
+### 🔐 Security Upgrades (High Impact)
+
+- Add message authentication (MAC verification)
+   - Explicitly verify AES-EAX authentication tags instead of only decrypting.
+   - Reject tampered or incomplete files automatically.
+
+- Use password confirmation handshake
+   - Perform a small encrypted challenge-response before sending full file.
+   - Prevent wasting bandwidth on wrong passwords.
+
+- Implement replay-attack protection
+   - Add per-session IDs or timestamps.
+   - Reject reused nonces or duplicated sessions.
+
+- Rate-limit authentication attempts
+   - Prevent brute-forcing the preset authentication code.
+
+### 🌐 Networking Enhancements
+
+- Support multiple concurrent clients
+   - Use threading or asyncio on the receiver side.
+   - Handle each client in an isolated session.
+
+- Chunk-based streaming encryption
+   - Encrypt/send files in chunks instead of loading entire file into memory.
+   - Enable large file support and lower RAM usage.
+
+- Resume interrupted transfers
+   - Track byte offsets.
+   - Allow sender to resume from last acknowledged chunk.
+
+- Add configurable socket timeouts
+   - Prevent hanging connections.
+
+### 🧾 Protocol & Architecture Improvements
+
+- Define a formal application-layer protocol
+   - Message types: AUTH, METADATA, DATA, ACK, ERROR.
+   - Version the protocol (for example CNFT/1.0).
+
+- Add integrity verification summary
+   - Send SHA-256 hash of original file.
+   - Verify hash after decryption.
+
+- Introduce session keys
+   - Derive one session key once.
+   - Derive per-file keys from it (HKDF-style design).
+
+### 🧑‍💻 Usability & UX Improvements
+
+- CLI flags instead of interactive input
+   - Example flags: --host, --port, --outdir, --file.
+   - Make scripts automation-friendly.
+
+- Progress reporting on both sides
+   - Receiver should show live progress too.
+
+- Transfer summary report
+   - Include file size, duration, throughput, and encryption mode.
+
+- Structured logging
+   - Replace print statements with logging levels (INFO, WARN, ERROR).
+
+### 📦 Engineering & Code Quality
+
+- Split crypto, networking, and UI into separate modules
+   - Example modules: crypto.py, protocol.py, network.py.
+
+- Add unit tests for crypto and protocol logic
+   - Key derivation consistency tests.
+   - Metadata parsing correctness tests.
+
+- Add requirements.txt and Makefile
+   - Improve setup and reproducibility.
+
+- Add type hints and docstrings
+   - Improve maintainability and interview-readiness.
+
+### 🔄 Feature Extensions (Very Impressive)
+
+- End-to-end public-key exchange
+   - Use RSA or ECC to exchange AES keys securely.
+   - Eliminate direct password sharing.
+
+- Encrypted directory transfer
+   - Recursively send folders.
+   - Preserve folder structure and metadata.
+
+- Basic access control
+   - Authorized sender list or user accounts.
+
+- Encrypted file storage on receiver
+   - Keep files encrypted at rest.
+   - Decrypt only on demand.
+
+### 🧠 Academic / Resume-Level Enhancements
+
+- Threat model documentation
+   - Define attacker capabilities and defenses.
+
+- Security comparison section
+   - Compare this protocol with SCP/SFTP at a high level.
+
+- Performance benchmarks
+   - Measure throughput across multiple file sizes.
+
+- Protocol diagram
+   - Visualize handshake, key derivation, transfer, and verification phases.
