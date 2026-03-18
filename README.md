@@ -4,8 +4,6 @@ This project is a Computer Networks (CN) course project that implements secure f
 
 ## Part 1: Legacy Implementation (Old Code)
 
-The scripts `final_sender.py` and `final_rec.py` are now considered the old/legacy implementation, and their position in the project has changed over time as the project evolves.
-
 ### Legacy Scripts
 
 - `final_sender.py`: legacy client script (sender)
@@ -26,15 +24,17 @@ The scripts `final_sender.py` and `final_rec.py` are now considered the old/lega
 Install dependencies:
 
 ```bash
-pip install pycryptodome tqdm
+uv add pycryptodome tqdm
 ```
+
+Run commands for the legacy scripts with `uv run`.
 
 ### Usage (Legacy Scripts)
 
 1. Start the receiver on the receiving machine:
 
 ```bash
-python final_rec.py
+uv run final_rec.py
 ```
 
 Enter the preset code `CN_SECURE_1234`, then choose listening IP, port (default 9999), and output directory.
@@ -42,7 +42,7 @@ Enter the preset code `CN_SECURE_1234`, then choose listening IP, port (default 
 2. Start the sender on the sending machine:
 
 ```bash
-python final_sender.py
+uv run final_sender.py
 ```
 
 Provide receiver IP and port, choose a file, and enter the password used for encryption.
