@@ -43,20 +43,23 @@ def send_file(file_path, password, server_ip, server_port):
     client.send(filename.encode())
     client.send(struct.pack("Q", file_size))
 
-    # Send salt and nonce for decryption
-    client.send(salt)
-    client.send(nonce)
+    
 
     # Read file, encrypt and send
     with open(file_path, "rb") as f:
         data = f.read()
-        encrypted = cipher.encrypt(data)
+        ciphertext,tag = cipher.encrypt_and_digest(data)
+
+    # Send salt and nonce for decryption
+    client.send(salt)
+    client.send(nonce)
+    client.send(tag)
 
     # Show progress
     progress = tqdm.tqdm(total=file_size, unit="B", unit_scale=True, unit_divisor=1024)
 
     try:
-        client.sendall(encrypted)
+        client.sendall(ciphertext)
         progress.update(file_size)
         print(f"✅ File {filename} sent successfully with encryption.")
         return True
