@@ -2,6 +2,8 @@ import os
 import socket
 import struct
 import tqdm
+import hmac
+import hashlib
 
 # import sys
 from Crypto.Cipher import AES
@@ -9,7 +11,47 @@ from Crypto.Protocol.KDF import PBKDF2
 from Crypto.Random import get_random_bytes
 
 
-def send_file(file_path, password, server_ip, server_port):
+def recv_exact(sock, n):
+    data = b""
+    while len(data) < n:
+        chunk = sock.recv(n - len(data))
+        if not chunk:
+            raise ConnectionError("Connection lost during authentication")
+        data += chunk
+    return data
+
+
+def authenticate_with_receiver(client, preset_code):
+    """
+    Perform challenge-response authentication with receiver.
+    Returns True if successful, False otherwise.
+    """
+    key = preset_code.encode()
+
+    try:
+        challenge = recv_exact(client, 32)
+        response = hmac.new(key, challenge, hashlib.sha256).digest()
+        client.sendall(response)
+
+        counter_challenge = recv_exact(client, 32)
+        counter_response = hmac.new(key, counter_challenge, hashlib.sha256).digest()
+        client.sendall(counter_response)
+
+        status = client.recv(32)
+        return status == b"AUTH_SUCCESS"
+    except (ConnectionError, OSError):
+        return False
+
+
+def get_preset_code():
+    preset_code = input("Enter preset code: ").strip()
+    if not preset_code:
+        print("❌ Error: Preset code cannot be empty.")
+        raise SystemExit(1)
+    return preset_code
+
+
+def send_file(file_path, password, server_ip, server_port, preset_code):
     """
     Send a file with encryption to the server
     """
@@ -34,6 +76,13 @@ def send_file(file_path, password, server_ip, server_port):
         )
         return False
 
+    if not authenticate_with_receiver(client, preset_code):
+        print("❌ Authentication failed with receiver")
+        client.close()
+        return False
+
+    print("✅ Authentication successful, proceeding with file transfer")
+
     # Get filename from path and file size
     filename = os.path.basename(file_path)
     file_size = os.path.getsize(file_path)
@@ -43,12 +92,10 @@ def send_file(file_path, password, server_ip, server_port):
     client.send(filename.encode())
     client.send(struct.pack("Q", file_size))
 
-    
-
     # Read file, encrypt and send
     with open(file_path, "rb") as f:
         data = f.read()
-        ciphertext,tag = cipher.encrypt_and_digest(data)
+        ciphertext, tag = cipher.encrypt_and_digest(data)
 
     # Send salt and nonce for decryption
     client.send(salt)
@@ -79,8 +126,9 @@ if __name__ == "__main__":
         or "172.20.10.3"
     )
     server_port = int(
-        input("Enter receiver's port (default: 9999): ").strip() or "9999"
+        input("Enter receiver's port (default: 1205): ").strip() or "1205"
     )
+    PRESET_CODE = get_preset_code()
 
     while True:
         file_path = input(
@@ -99,7 +147,7 @@ if __name__ == "__main__":
             continue
 
         print(f"\n📤 Sending {os.path.basename(file_path)}...")
-        send_file(file_path, password, server_ip, server_port)
+        send_file(file_path, password, server_ip, server_port, PRESET_CODE)
 
         continue_sending = input("\nSend another file? (y/n): ").strip().lower()
         if continue_sending != "y":
