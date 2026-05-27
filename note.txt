@@ -1,0 +1,2 @@
+all the preset code and token type thing that authentication uses we need to put it in a .env file
+cant leave all that hardcoded in our codebase
