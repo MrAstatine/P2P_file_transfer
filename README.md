@@ -2,59 +2,7 @@
 
 This project is a Computer Networks (CN) course project that implements secure file transfer between machines over TCP with AES-based encryption.
 
-## Part 1: Legacy Implementation (Old Code)
-
-### Legacy Scripts
-
-- `final_sender.py`: legacy client script (sender)
-- `final_rec.py`: legacy server script (receiver)
-
-### Legacy Features
-
-- Port-to-port transfer over TCP sockets
-- AES encryption (EAX mode)
-- PBKDF2-based key derivation with random salt
-- File metadata exchange (filename and size)
-- Progress bar with tqdm
-- Preset code authentication before receiving files
-- Custom destination directory support on receiver side
-
-### Requirements
-
-Install dependencies:
-
-```bash
-uv add pycryptodome tqdm
-```
-
-Run commands for the legacy scripts with `uv run`.
-
-### Usage (Legacy Scripts)
-
-1. Start the receiver on the receiving machine:
-
-```bash
-uv run final_rec.py
-```
-
-Enter the preset code `CN_SECURE_1234`, then choose listening IP, port (default 9999), and output directory.
-
-2. Start the sender on the sending machine:
-
-```bash
-uv run final_sender.py
-```
-
-Provide receiver IP and port, choose a file, and enter the password used for encryption.
-
-You can send/receive multiple files in a session.
-
-### Notes for Legacy Flow
-
-- Sender and receiver should be on the same network (or reachable through proper port forwarding).
-- Receiver must use the same password entered on sender side for successful decryption.
-
-## Part 2: Future Work Roadmap
+## Future Work Roadmap
 
 ### 🔐 Security Upgrades (High Impact)
 
