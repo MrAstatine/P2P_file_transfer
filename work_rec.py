@@ -1,13 +1,24 @@
 import socket
 import struct
-import tqdm
 import sys
 import os
 import hmac
 import hashlib
+import threading
+import contextlib
+import time
 from Crypto.Cipher import AES
 from Crypto.Protocol.KDF import PBKDF2
 from Crypto.Random import get_random_bytes
+
+chunks = {}
+total_chunks_expected = None
+filename_global = None
+password_global = None
+last_progress_ts = None
+lock = threading.Lock()
+PBKDF2_ROUNDS = 200_000
+CHUNK_SIZE = 4 * 1024 * 1024
 
 
 def recv_exact(sock, n):
@@ -25,6 +36,16 @@ def get_preset_code():
     print("🔐 Setup Authentication")
     code = input("Enter preset code for this session: ").strip()
     return code
+
+
+def reset_state():
+    global chunks, total_chunks_expected, filename_global, password_global, last_progress_ts
+    with lock:
+        chunks = {}
+        total_chunks_expected = None
+        filename_global = None
+        password_global = None
+        last_progress_ts = None
 
 
 def authenticate_sender(client, preset_code):
@@ -63,103 +84,134 @@ def authenticate_sender(client, preset_code):
         return False
 
 
-def receive_file(client, save_dir="."):
-    """
-    Receive and decrypt a file from the client
-    """
-    # Receive filename details
-    filename_length = struct.unpack("I", recv_exact(client, 4))[0]
-    filename = recv_exact(client, filename_length).decode()
-    file_size = struct.unpack("Q", recv_exact(client, 8))[0]
-
-    print(f"\n⬇ Receiving file: {filename} ({file_size} bytes)")
-
-    # Receive the salt and nonce
-    salt = recv_exact(client, 16)
-    nonce = recv_exact(client, 16)
-    tag = recv_exact(client, 16)
-
-    # Get password for this specific file
-    password = input(f"Enter password for decrypting {filename}: ").strip().encode()
-
-    # Derive the key using the provided password
-    key = PBKDF2(password, salt, dkLen=32)
-
-    # Create the cipher for decryption
-    cipher = AES.new(key, AES.MODE_EAX, nonce)
-
-    # Receive and decrypt the file
-    file_bytes = b""
-    progress = tqdm.tqdm(total=file_size, unit="B", unit_scale=True, unit_divisor=1024)
-
-    while len(file_bytes) < file_size:
-        chunk = client.recv(min(1024, file_size - len(file_bytes)))
-        if not chunk:
-            break
-        file_bytes += chunk
-        progress.update(len(chunk))
-
-    # Check if we received the complete file
-    if len(file_bytes) != file_size:
-        print(f"❌ Error: Expected {file_size} bytes but got {len(file_bytes)} bytes.")
-        return False
+def receive_chunk(client, preset_code):
+    global total_chunks_expected, filename_global, password_global, last_progress_ts
 
     try:
-        # Try to decrypt
-        decrypted_data = cipher.decrypt_and_verify(file_bytes, tag)
+        client.settimeout(10)
 
-        # Save the file
-        save_path = os.path.join(save_dir, "received_" + filename)
-        with open(save_path, "wb") as f:
-            f.write(decrypted_data)
-        print(f"✅ File received and saved successfully to {save_path}")
+        if not authenticate_sender(client, preset_code):
+            print("❌ Authentication failed for chunk connection")
+            return
+
+        filename_length = struct.unpack("!I", recv_exact(client, 4))[0]
+        filename = recv_exact(client, filename_length).decode()
+        filename = "received_" + filename
+
+        chunk_id = struct.unpack("!I", recv_exact(client, 4))[0]
+        total_chunks = struct.unpack("!I", recv_exact(client, 4))[0]
+        chunk_size = struct.unpack("!I", recv_exact(client, 4))[0]
+
+        salt = recv_exact(client, 16)
+        nonce = recv_exact(client, 16)
+        tag = recv_exact(client, 16)
+        encrypted = recv_exact(client, chunk_size)
+
+        if password_global is None:
+            with lock:
+                if password_global is None:
+                    password_global = input(f"Enter password for {filename}: ").encode()
+
+        key = PBKDF2(password_global, salt, dkLen=32, count=PBKDF2_ROUNDS)
+        cipher = AES.new(key, AES.MODE_EAX, nonce)
+        decrypted = cipher.decrypt_and_verify(encrypted, tag)
+
+        with lock:
+            if chunk_id not in chunks:
+                chunks[chunk_id] = decrypted
+                total_chunks_expected = total_chunks
+                filename_global = filename
+                last_progress_ts = time.time()
+
+            print(f"⬇ Received chunk {chunk_id + 1}/{total_chunks}")
+
+    except Exception as e:
+        print(f"❌ Error receiving chunk: {e}")
+    finally:
+        client.close()
+
+
+def receive_one_file(server, preset_code, save_dir):
+    """Receive a single chunked file session; returns True if successful."""
+    reset_state()
+
+    server.settimeout(2)
+    idle_grace = 5
+
+    while True:
+        try:
+            client, addr = server.accept()
+        except socket.timeout:
+            with lock:
+                if total_chunks_expected and last_progress_ts:
+                    if (time.time() - last_progress_ts) > idle_grace:
+                        break
+            continue
+        except OSError:
+            return False
+
+        print(f"🔗 Connection from {addr}")
+        worker = threading.Thread(target=receive_chunk, args=(client, preset_code))
+        worker.daemon = True
+        worker.start()
+
+        with lock:
+            if total_chunks_expected and len(chunks) == total_chunks_expected:
+                break
+
+    if total_chunks_expected and len(chunks) == total_chunks_expected:
+        output_path = os.path.join(save_dir, filename_global)
+        with open(output_path, "wb") as f:
+            for i in range(total_chunks_expected):
+                f.write(chunks[i])
+
+        print(f"✅ File received and saved to: {output_path}")
         return True
-    except ValueError:
-        print("❌ File tampered or wrong password!")
-        return False
+
+    missing = []
+    if total_chunks_expected:
+        missing = [i for i in range(total_chunks_expected) if i not in chunks]
+
+    if missing:
+        print(
+            f"⚠️  Incomplete transfer. Missing chunks: {missing[:10]}"
+            + (" ..." if len(missing) > 10 else "")
+        )
+    else:
+        print("⚠️  Incomplete transfer. File not reconstructed.")
+    return False
 
 
 def start_server(host="0.0.0.0", port=9999, save_dir=".", preset_code=None):
-    """
-    Start the server to receive multiple files
-    """
-    # Initialize socket
+    """Start the server to receive chunked files."""
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((host, port))
-    server.listen(1)
+    server.listen(50)
 
-    print(f"📡 Server started on {host}:{port}. Waiting for connections...")
+    print(f"📡 Listening on {host}:{port} (waiting for sender)...")
 
     try:
         while True:
-            client, addr = server.accept()
-            print(f"🔌 Connection from {addr}")
+            ok = receive_one_file(server, preset_code, save_dir)
 
-            if not authenticate_sender(client, preset_code):
-                print(f"❌ Authentication failed from {addr}")
-                client.close()
-                continue
+            if ok:
+                print("🎉 Transfer complete.")
+            else:
+                print("⚠️  Transfer ended without full success.")
 
-            print(f"✅ Sender authenticated from {addr}")
-
-            # Receive a file
-            receive_file(client, save_dir)
-
-            # Close the connection
-            client.close()
-
-            # Ask if more files are expected
-            continue_receiving = input("\nWait for more files? (y/n): ").strip().lower()
-            if continue_receiving != "y":
+            choice = input("Receive another file? (y/n): ").strip().lower()
+            if choice != "y":
                 break
 
-            print("\n📡 Waiting for next file...")
+            print("📡 Ready for next file. Waiting for sender...")
 
     except KeyboardInterrupt:
-        print("\n🛑 Server stopped by user.")
+        print("\n🛑 Server stopped")
     finally:
-        server.close()
-        print("👋 File receiver session ended.")
+        with contextlib.suppress(Exception):
+            server.close()
+        print("👋 Receiver closed")
 
 
 if __name__ == "__main__":
@@ -170,26 +222,16 @@ if __name__ == "__main__":
         print("❌ Error: Preset code cannot be empty.")
         sys.exit(1)
 
-    # Get server settings
-    host = (
-        input("Enter listening IP (default: 0.0.0.0 for all interfaces): ").strip()
-        or "0.0.0.0"
-    )
-    port = int(input("Enter port to listen on (default: 1205): ").strip() or "1205")
+    try:
+        host = input("Enter listening IP (default: 0.0.0.0): ").strip() or "0.0.0.0"
+        port_str = input("Enter port (default: 9999): ").strip() or "9999"
+        port = int(port_str)
+    except ValueError:
+        print("❌ Invalid port. Exiting.")
+        sys.exit(1)
 
-    # Get save directory
-    save_dir = (
-        input("Enter directory to save files (default: current directory): ").strip()
-        or "."
-    )
+    save_dir = input("Enter save directory (default: current): ").strip() or "."
     if not os.path.exists(save_dir):
-        try:
-            os.makedirs(save_dir)
-            print(f"✅ Created directory: {save_dir}")
-        except Exception:
-            print(f"❌ Error creating directory: {save_dir}")
-            print("Using current directory instead.")
-            save_dir = "."
+        os.makedirs(save_dir)
 
-    # Start the server
-    start_server(host, port, save_dir, preset_code)
+    sys.exit(start_server(host, port, save_dir, preset_code))

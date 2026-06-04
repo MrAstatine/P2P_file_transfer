@@ -1,14 +1,20 @@
 import os
 import socket
 import struct
+import time
 import tqdm
 import hmac
 import hashlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # import sys
 from Crypto.Cipher import AES
 from Crypto.Protocol.KDF import PBKDF2
 from Crypto.Random import get_random_bytes
+
+CHUNK_SIZE = 4 * 1024 * 1024
+PBKDF2_ROUNDS = 200_000
+MAX_RETRIES = 3
 
 
 def recv_exact(sock, n):
@@ -51,70 +57,122 @@ def get_preset_code():
     return preset_code
 
 
+def send_chunk(
+    file_path,
+    password,
+    server_ip,
+    server_port,
+    preset_code,
+    filename,
+    chunk_id,
+    offset,
+    size,
+    total_chunks,
+):
+    """Encrypt and send one chunk. Returns bytes sent on success, 0 on failure."""
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            client.connect((server_ip, server_port))
+
+            if not authenticate_with_receiver(client, preset_code):
+                raise ConnectionError("Authentication failed with receiver")
+
+            with open(file_path, "rb") as f:
+                f.seek(offset)
+                chunk_data = f.read(size)
+
+            salt = get_random_bytes(16)
+            key = PBKDF2(password.encode(), salt, dkLen=32, count=PBKDF2_ROUNDS)
+            nonce = get_random_bytes(16)
+
+            cipher = AES.new(key, AES.MODE_EAX, nonce)
+            ciphertext, tag = cipher.encrypt_and_digest(chunk_data)
+
+            client.sendall(struct.pack("!I", len(filename)))
+            client.sendall(filename.encode())
+            client.sendall(struct.pack("!I", chunk_id))
+            client.sendall(struct.pack("!I", total_chunks))
+            client.sendall(struct.pack("!I", len(ciphertext)))
+            client.sendall(salt)
+            client.sendall(nonce)
+            client.sendall(tag)
+            client.sendall(ciphertext)
+
+            return len(chunk_data)
+
+        except (
+            ConnectionRefusedError,
+            TimeoutError,
+            BrokenPipeError,
+            ConnectionError,
+        ) as e:
+            print(f"❌ Chunk {chunk_id}: {e} (attempt {attempt}/{MAX_RETRIES})")
+            time.sleep(0.5 * attempt)
+        except Exception as e:
+            print(f"❌ Chunk {chunk_id}: {e} (attempt {attempt}/{MAX_RETRIES})")
+            break
+        finally:
+            client.close()
+
+    return 0
+
+
 def send_file(file_path, password, server_ip, server_port, preset_code):
-    """
-    Send a file with encryption to the server
-    """
-    # Convert string password to bytes
-    password_bytes = password.encode()
+    """Send a file in encrypted chunks to the server."""
 
-    # Generate salt and derive key
-    salt = get_random_bytes(16)
-    key = PBKDF2(password_bytes, salt, dkLen=32)
-
-    # Generate nonce and create cipher
-    nonce = get_random_bytes(16)
-    cipher = AES.new(key, AES.MODE_EAX, nonce)
-
-    # Create socket and connect
-    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        client.connect((server_ip, server_port))
-    except ConnectionRefusedError:
-        print(
-            "❌ Error: Cannot connect to the server. Make sure the receiver is running."
-        )
-        return False
-
-    if not authenticate_with_receiver(client, preset_code):
-        print("❌ Authentication failed with receiver")
-        client.close()
-        return False
-
-    print("✅ Authentication successful, proceeding with file transfer")
-
-    # Get filename from path and file size
     filename = os.path.basename(file_path)
     file_size = os.path.getsize(file_path)
+    total_chunks = (file_size + CHUNK_SIZE - 1) // CHUNK_SIZE
+    threads = min(8, total_chunks)
 
-    # Send filename and file size
-    client.send(struct.pack("I", len(filename)))
-    client.send(filename.encode())
-    client.send(struct.pack("Q", file_size))
+    print(f"\n📤 Sending {filename}")
+    print(f"📦 Total chunks: {total_chunks}, Threads: {threads}")
 
-    # Read file, encrypt and send
-    with open(file_path, "rb") as f:
-        data = f.read()
-        ciphertext, tag = cipher.encrypt_and_digest(data)
-
-    # Send salt and nonce for decryption
-    client.send(salt)
-    client.send(nonce)
-    client.send(tag)
-
-    # Show progress
     progress = tqdm.tqdm(total=file_size, unit="B", unit_scale=True, unit_divisor=1024)
+    bytes_sent = 0
+    failed_chunks = []
 
-    try:
-        client.sendall(ciphertext)
-        progress.update(file_size)
-        print(f"✅ File {filename} sent successfully with encryption.")
-        return True
-    except BrokenPipeError:
-        print("❌ Connection lost! Receiver closed unexpectedly.")
+    with ThreadPoolExecutor(max_workers=threads) as executor:
+        futures = {
+            executor.submit(
+                send_chunk,
+                file_path,
+                password,
+                server_ip,
+                server_port,
+                preset_code,
+                filename,
+                chunk_id,
+                chunk_id * CHUNK_SIZE,
+                min(CHUNK_SIZE, file_size - (chunk_id * CHUNK_SIZE)),
+                total_chunks,
+            ): chunk_id
+            for chunk_id in range(total_chunks)
+        }
+
+        try:
+            for future in as_completed(futures):
+                chunk_id = futures[future]
+                sent_now = future.result()
+                if sent_now:
+                    bytes_sent += sent_now
+                    progress.update(sent_now)
+                else:
+                    failed_chunks.append(chunk_id)
+        except KeyboardInterrupt:
+            print("\n🛑 Cancelled by user. Waiting for active chunk sends to finish...")
+        finally:
+            progress.close()
+
+    if failed_chunks:
+        print(f"❌ Failed chunks: {sorted(failed_chunks)}")
+        print(f"⚠️  File {filename} not fully sent.")
         return False
-    finally:
-        client.close()
+
+    print(f"✅ File {filename} sent successfully ({bytes_sent} bytes).")
+    return True
 
 
 if __name__ == "__main__":
