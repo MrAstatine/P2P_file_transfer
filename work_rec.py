@@ -10,6 +10,7 @@ import time
 from Crypto.Cipher import AES
 from Crypto.Protocol.KDF import PBKDF2
 from Crypto.Random import get_random_bytes
+from receiver_detection import detect_receiver_host
 
 chunks = {}
 total_chunks_expected = None
@@ -222,13 +223,16 @@ if __name__ == "__main__":
         print("❌ Error: Preset code cannot be empty.")
         sys.exit(1)
 
+    host = detect_receiver_host()
+
     try:
-        host = input("Enter listening IP (default: 0.0.0.0): ").strip() or "0.0.0.0"
         port_str = input("Enter port (default: 9999): ").strip() or "9999"
         port = int(port_str)
     except ValueError:
         print("❌ Invalid port. Exiting.")
         sys.exit(1)
+
+    print(f"📡 Auto-detected receiver host: {host}")
 
     save_dir = input("Enter save directory (default: current): ").strip() or "."
     if not os.path.exists(save_dir):
