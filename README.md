@@ -6,11 +6,11 @@ This project is a Computer Networks (CN) course project that implements secure f
 
 ### 🔐 Security Upgrades (High Impact)
 
-- Add message authentication (MAC verification)
+- ✅ Add message authentication (MAC verification)
    - Explicitly verify AES-EAX authentication tags instead of only decrypting.
    - Reject tampered or incomplete files automatically.
 
-- Use password confirmation handshake
+- ✅ Use password confirmation handshake
    - Perform a small encrypted challenge-response before sending full file.
    - Prevent wasting bandwidth on wrong passwords.
 
@@ -23,11 +23,11 @@ This project is a Computer Networks (CN) course project that implements secure f
 
 ### 🌐 Networking Enhancements
 
-- Support multiple concurrent clients
+- ✅ Support multiple concurrent clients
    - Use threading or asyncio on the receiver side.
    - Handle each client in an isolated session.
 
-- Chunk-based streaming encryption
+- ✅ Chunk-based streaming encryption
    - Encrypt/send files in chunks instead of loading entire file into memory.
    - Enable large file support and lower RAM usage.
 
@@ -35,7 +35,7 @@ This project is a Computer Networks (CN) course project that implements secure f
    - Track byte offsets.
    - Allow sender to resume from last acknowledged chunk.
 
-- Add configurable socket timeouts
+- ✅ Add configurable socket timeouts
    - Prevent hanging connections.
 
 ### 🧾 Protocol & Architecture Improvements
@@ -58,7 +58,8 @@ This project is a Computer Networks (CN) course project that implements secure f
    - Example flags: --host, --port, --outdir, --file.
    - Make scripts automation-friendly.
 
-- Progress reporting on both sides
+- ✅ Progress reporting on both sides
+   - Sender shows live tqdm progress bar.
    - Receiver should show live progress too.
 
 - Transfer summary report
