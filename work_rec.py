@@ -1,5 +1,6 @@
 import socket
 import struct
+import subprocess
 import sys
 import os
 import hmac
@@ -234,7 +235,25 @@ if __name__ == "__main__":
 
     print(f"📡 Auto-detected receiver host: {host}")
 
-    save_dir = input("Enter save directory (default: current): ").strip() or "."
+    print("📂 Opening folder picker for save directory...")
+    code = (
+        "import tkinter as tk; from tkinter import filedialog; "
+        "root = tk.Tk(); root.withdraw(); root.attributes('-topmost', True); "
+        "d = filedialog.askdirectory(title='Select save directory'); "
+        "print(d if d else '')"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True, text=True,
+    )
+    save_dir = result.stdout.strip()
+
+    if not save_dir:
+        save_dir = "."
+        print("📁 No folder selected. Using current directory.")
+    else:
+        print(f"📁 Save directory: {save_dir}")
+
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 

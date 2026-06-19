@@ -1,13 +1,14 @@
 import os
 import socket
 import struct
+import subprocess
+import sys
 import time
 import tqdm
 import hmac
 import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# import sys
 from Crypto.Cipher import AES
 from Crypto.Protocol.KDF import PBKDF2
 from Crypto.Random import get_random_bytes
@@ -175,8 +176,25 @@ def send_file(file_path, password, server_ip, server_port, preset_code):
     return True
 
 
+def pick_file():
+    """Open a native file picker in an isolated subprocess to avoid Tcl conflicts."""
+    code = (
+        "import tkinter as tk; from tkinter import filedialog; "
+        "root = tk.Tk(); root.withdraw(); root.attributes('-topmost', True); "
+        "f = filedialog.askopenfilename(title='Select a file to send'); "
+        "print(f if f else '')"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True, text=True,
+    )
+    return result.stdout.strip()
+
+
 if __name__ == "__main__":
     print("📤 Secure File Transfer - Sender")
+
+    PRESET_CODE = get_preset_code()
 
     # Get server details
     server_ip = (
@@ -186,13 +204,13 @@ if __name__ == "__main__":
     server_port = int(
         input("Enter receiver's port (default: 1205): ").strip() or "1205"
     )
-    PRESET_CODE = get_preset_code()
 
     while True:
-        file_path = input(
-            "\nEnter the path to the file to send (or 'exit' to quit): "
-        ).strip()
-        if file_path.lower() == "exit":
+        print("\n📂 Opening file picker...")
+        file_path = pick_file()
+
+        if not file_path:
+            print("🚪 No file selected. Exiting.")
             break
 
         if not os.path.exists(file_path):
