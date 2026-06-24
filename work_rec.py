@@ -1,36 +1,48 @@
+import contextlib
+import hashlib
+import hmac
+import os
 import socket
-import struct
 import subprocess
 import sys
-import os
-import hmac
-import hashlib
 import threading
-import contextlib
 import time
+
 from Crypto.Cipher import AES
 from Crypto.Protocol.KDF import PBKDF2
 from Crypto.Random import get_random_bytes
 from receiver_detection import detect_receiver_host
 
-chunks = {}
-total_chunks_expected = None
-filename_global = None
-password_global = None
-last_progress_ts = None
+from transfer_resume import (
+    CHUNK_ACK,
+    CHUNK_DATA,
+    DEFAULT_CHUNK_SIZE,
+    PBKDF2_ROUNDS,
+    RESUME_QUERY,
+    bitmap_all_set,
+    bitmap_has_chunk,
+    chunk_offset,
+    chunk_size_for_id,
+    empty_bitmap,
+    ensure_manifest,
+    ensure_part_file,
+    finalize_manifest,
+    manifest_bitmap,
+    received_bytes_from_bitmap,
+    recv_exact,
+    recv_transfer_metadata,
+    recv_uint32,
+    send_uint32,
+    update_manifest_bitmap,
+    bitmap_mark_chunk,
+)
+
 lock = threading.Lock()
-PBKDF2_ROUNDS = 200_000
-CHUNK_SIZE = 4 * 1024 * 1024
-
-
-def recv_exact(sock, n):
-    data = b""
-    while len(data) < n:
-        chunk = sock.recv(n - len(data))
-        if not chunk:
-            raise ConnectionError("Connection lost")
-        data += chunk
-    return data
+password_global = None
+active_transfer_id = None
+last_activity_ts = None
+transfer_completed = False
+CHUNK_SIZE = DEFAULT_CHUNK_SIZE
 
 
 def get_preset_code():
@@ -41,13 +53,12 @@ def get_preset_code():
 
 
 def reset_state():
-    global chunks, total_chunks_expected, filename_global, password_global, last_progress_ts
+    global password_global, active_transfer_id, last_activity_ts, transfer_completed
     with lock:
-        chunks = {}
-        total_chunks_expected = None
-        filename_global = None
         password_global = None
-        last_progress_ts = None
+        active_transfer_id = None
+        last_activity_ts = None
+        transfer_completed = False
 
 
 def authenticate_sender(client, preset_code):
@@ -86,9 +97,110 @@ def authenticate_sender(client, preset_code):
         return False
 
 
-def receive_chunk(client, preset_code):
-    global total_chunks_expected, filename_global, password_global, last_progress_ts
+def _record_activity(transfer_id):
+    global active_transfer_id, last_activity_ts
+    with lock:
+        active_transfer_id = transfer_id
+        last_activity_ts = time.time()
 
+
+def _load_or_create_manifest(save_dir, metadata):
+    manifest = ensure_manifest(
+        save_dir,
+        metadata["transfer_id"],
+        metadata["filename"],
+        metadata["file_size"],
+        metadata["chunk_size"],
+    )
+    return manifest, manifest_bitmap(manifest)
+
+
+def _prompt_password(filename):
+    global password_global
+    with lock:
+        if password_global is None:
+            password_global = input(f"Enter password for {filename}: ").encode()
+        return password_global
+
+
+def handle_resume_query(client, save_dir):
+    metadata = recv_transfer_metadata(client)
+    _record_activity(metadata["transfer_id"])
+
+    manifest, bitmap = _load_or_create_manifest(save_dir, metadata)
+    if len(bitmap) == 0 and manifest["total_chunks"]:
+        bitmap = empty_bitmap(manifest["total_chunks"])
+
+    received_bytes = received_bytes_from_bitmap(
+        bitmap, manifest["file_size"], manifest["chunk_size"]
+    )
+    send_uint32(client, len(bitmap))
+    client.sendall(bitmap)
+
+    print(
+        f"♻️  Resume query for {metadata['filename']}: "
+        f"{received_bytes}/{manifest['file_size']} bytes already stored"
+    )
+
+
+def handle_chunk_data(client, save_dir):
+    metadata = recv_transfer_metadata(client)
+    _record_activity(metadata["transfer_id"])
+
+    chunk_id = recv_uint32(client)
+    if chunk_id >= metadata["total_chunks"]:
+        raise ValueError(f"Chunk {chunk_id} is out of range")
+
+    expected_size = chunk_size_for_id(
+        metadata["file_size"], metadata["chunk_size"], chunk_id
+    )
+    salt = recv_exact(client, 16)
+    nonce = recv_exact(client, 16)
+    tag = recv_exact(client, 16)
+    encrypted = recv_exact(client, expected_size)
+
+    password = _prompt_password(metadata["filename"])
+
+    with lock:
+        manifest = ensure_manifest(
+            save_dir,
+            metadata["transfer_id"],
+            metadata["filename"],
+            metadata["file_size"],
+            metadata["chunk_size"],
+        )
+        bitmap = manifest_bitmap(manifest)
+
+        if manifest.get("completed") or bitmap_has_chunk(bitmap, chunk_id):
+            client.sendall(CHUNK_ACK)
+            return
+
+        key = PBKDF2(password, salt, dkLen=32, count=PBKDF2_ROUNDS)
+        cipher = AES.new(key, AES.MODE_EAX, nonce)
+        decrypted = cipher.decrypt_and_verify(encrypted, tag)
+
+        ensure_part_file(manifest)
+        with open(manifest["part_path"], "r+b") as handle:
+            handle.seek(chunk_offset(chunk_id, metadata["chunk_size"]))
+            handle.write(decrypted)
+
+        bitmap_mark_chunk(bitmap, chunk_id)
+        update_manifest_bitmap(save_dir, manifest, bitmap)
+
+        if bitmap_all_set(bitmap, manifest["total_chunks"]):
+            os.replace(manifest["part_path"], manifest["final_path"])
+            finalize_manifest(save_dir, manifest, bitmap)
+
+            global transfer_completed
+            transfer_completed = True
+
+    print(
+        f"⬇ Received chunk {chunk_id + 1}/{manifest['total_chunks']} for {metadata['filename']}"
+    )
+    client.sendall(CHUNK_ACK)
+
+
+def receive_connection(client, preset_code, save_dir):
     try:
         client.settimeout(10)
 
@@ -96,39 +208,15 @@ def receive_chunk(client, preset_code):
             print("❌ Authentication failed for chunk connection")
             return
 
-        filename_length = struct.unpack("!I", recv_exact(client, 4))[0]
-        filename = recv_exact(client, filename_length).decode()
-        filename = "received_" + filename
-
-        chunk_id = struct.unpack("!I", recv_exact(client, 4))[0]
-        total_chunks = struct.unpack("!I", recv_exact(client, 4))[0]
-        chunk_size = struct.unpack("!I", recv_exact(client, 4))[0]
-
-        salt = recv_exact(client, 16)
-        nonce = recv_exact(client, 16)
-        tag = recv_exact(client, 16)
-        encrypted = recv_exact(client, chunk_size)
-
-        if password_global is None:
-            with lock:
-                if password_global is None:
-                    password_global = input(f"Enter password for {filename}: ").encode()
-
-        key = PBKDF2(password_global, salt, dkLen=32, count=PBKDF2_ROUNDS)
-        cipher = AES.new(key, AES.MODE_EAX, nonce)
-        decrypted = cipher.decrypt_and_verify(encrypted, tag)
-
-        with lock:
-            if chunk_id not in chunks:
-                chunks[chunk_id] = decrypted
-                total_chunks_expected = total_chunks
-                filename_global = filename
-                last_progress_ts = time.time()
-
-            print(f"⬇ Received chunk {chunk_id + 1}/{total_chunks}")
-
+        command = recv_exact(client, 1)
+        if command == RESUME_QUERY:
+            handle_resume_query(client, save_dir)
+        elif command == CHUNK_DATA:
+            handle_chunk_data(client, save_dir)
+        else:
+            raise ValueError(f"Unknown command: {command!r}")
     except Exception as e:
-        print(f"❌ Error receiving chunk: {e}")
+        print(f"❌ Error handling connection: {e}")
     finally:
         client.close()
 
@@ -138,49 +226,39 @@ def receive_one_file(server, preset_code, save_dir):
     reset_state()
 
     server.settimeout(2)
-    idle_grace = 5
+    idle_grace = 8
 
     while True:
+        with lock:
+            if transfer_completed:
+                break
+
         try:
             client, addr = server.accept()
         except socket.timeout:
             with lock:
-                if total_chunks_expected and last_progress_ts:
-                    if (time.time() - last_progress_ts) > idle_grace:
+                if transfer_completed:
+                    break
+                if active_transfer_id and last_activity_ts:
+                    if (time.time() - last_activity_ts) > idle_grace:
                         break
             continue
         except OSError:
             return False
 
         print(f"🔗 Connection from {addr}")
-        worker = threading.Thread(target=receive_chunk, args=(client, preset_code))
+        worker = threading.Thread(
+            target=receive_connection, args=(client, preset_code, save_dir)
+        )
         worker.daemon = True
         worker.start()
 
-        with lock:
-            if total_chunks_expected and len(chunks) == total_chunks_expected:
-                break
+    with lock:
+        if transfer_completed:
+            print("✅ File received and reconstructed from resumable chunks.")
+            return True
 
-    if total_chunks_expected and len(chunks) == total_chunks_expected:
-        output_path = os.path.join(save_dir, filename_global)
-        with open(output_path, "wb") as f:
-            for i in range(total_chunks_expected):
-                f.write(chunks[i])
-
-        print(f"✅ File received and saved to: {output_path}")
-        return True
-
-    missing = []
-    if total_chunks_expected:
-        missing = [i for i in range(total_chunks_expected) if i not in chunks]
-
-    if missing:
-        print(
-            f"⚠️  Incomplete transfer. Missing chunks: {missing[:10]}"
-            + (" ..." if len(missing) > 10 else "")
-        )
-    else:
-        print("⚠️  Incomplete transfer. File not reconstructed.")
+    print("⚠️  Incomplete transfer. The manifest was saved for later resume.")
     return False
 
 
@@ -244,7 +322,8 @@ if __name__ == "__main__":
     )
     result = subprocess.run(
         [sys.executable, "-c", code],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     save_dir = result.stdout.strip()
 

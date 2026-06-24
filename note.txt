@@ -1,2 +1,6 @@
 all the preset code and token type thing that authentication uses we need to put it in a .env file
 cant leave all that hardcoded in our codebase
+
+
+.p2p_resume folder
+It stores the state needed to resume interrupted transfers: the chunk bitmap/manifest and the temporary partial file data. If a transfer stops, the receiver uses that folder to remember which chunks were already saved so the sender can continue from the missing ones instead of starting over.

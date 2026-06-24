@@ -1,31 +1,38 @@
+import hashlib
+import hmac
 import os
 import socket
 import struct
 import subprocess
 import sys
 import time
-import tqdm
-import hmac
-import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import tqdm
 from Crypto.Cipher import AES
 from Crypto.Protocol.KDF import PBKDF2
 from Crypto.Random import get_random_bytes
 
-CHUNK_SIZE = 4 * 1024 * 1024
-PBKDF2_ROUNDS = 200_000
+from transfer_resume import (
+    CHUNK_ACK,
+    CHUNK_DATA,
+    DEFAULT_CHUNK_SIZE,
+    PBKDF2_ROUNDS,
+    RESUME_QUERY,
+    build_transfer_id,
+    chunk_count,
+    chunk_offset,
+    chunk_size_for_id,
+    list_missing_chunks,
+    received_bytes_from_bitmap,
+    recv_exact,
+    recv_uint32,
+    send_transfer_metadata,
+)
+
+CHUNK_SIZE = DEFAULT_CHUNK_SIZE
 MAX_RETRIES = 3
-
-
-def recv_exact(sock, n):
-    data = b""
-    while len(data) < n:
-        chunk = sock.recv(n - len(data))
-        if not chunk:
-            raise ConnectionError("Connection lost during authentication")
-        data += chunk
-    return data
+MAX_RESUME_ROUNDS = 3
 
 
 def authenticate_with_receiver(client, preset_code):
@@ -58,6 +65,31 @@ def get_preset_code():
     return preset_code
 
 
+def request_resume_bitmap(file_path, password, server_ip, server_port, preset_code):
+    filename = os.path.basename(file_path)
+    file_size = os.path.getsize(file_path)
+    total_chunks = chunk_count(file_size, CHUNK_SIZE)
+    transfer_id = build_transfer_id(file_path, file_size, CHUNK_SIZE)
+
+    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        client.connect((server_ip, server_port))
+
+        if not authenticate_with_receiver(client, preset_code):
+            raise ConnectionError("Authentication failed while requesting resume state")
+
+        client.sendall(RESUME_QUERY)
+        send_transfer_metadata(
+            client, filename, file_size, CHUNK_SIZE, total_chunks, transfer_id
+        )
+
+        bitmap_length = recv_uint32(client)
+        bitmap = bytearray(recv_exact(client, bitmap_length))
+        return transfer_id, bitmap
+    finally:
+        client.close()
+
+
 def send_chunk(
     file_path,
     password,
@@ -65,10 +97,12 @@ def send_chunk(
     server_port,
     preset_code,
     filename,
+    file_size,
+    total_chunks,
+    transfer_id,
     chunk_id,
     offset,
     size,
-    total_chunks,
 ):
     """Encrypt and send one chunk. Returns bytes sent on success, 0 on failure."""
 
@@ -79,6 +113,12 @@ def send_chunk(
 
             if not authenticate_with_receiver(client, preset_code):
                 raise ConnectionError("Authentication failed with receiver")
+
+            client.sendall(CHUNK_DATA)
+            send_transfer_metadata(
+                client, filename, file_size, CHUNK_SIZE, total_chunks, transfer_id
+            )
+            client.sendall(struct.pack("!I", chunk_id))
 
             with open(file_path, "rb") as f:
                 f.seek(offset)
@@ -91,15 +131,14 @@ def send_chunk(
             cipher = AES.new(key, AES.MODE_EAX, nonce)
             ciphertext, tag = cipher.encrypt_and_digest(chunk_data)
 
-            client.sendall(struct.pack("!I", len(filename)))
-            client.sendall(filename.encode())
-            client.sendall(struct.pack("!I", chunk_id))
-            client.sendall(struct.pack("!I", total_chunks))
-            client.sendall(struct.pack("!I", len(ciphertext)))
             client.sendall(salt)
             client.sendall(nonce)
             client.sendall(tag)
             client.sendall(ciphertext)
+
+            ack = recv_exact(client, len(CHUNK_ACK))
+            if ack != CHUNK_ACK:
+                raise ConnectionError("Chunk ACK not received")
 
             return len(chunk_data)
 
@@ -125,54 +164,108 @@ def send_file(file_path, password, server_ip, server_port, preset_code):
 
     filename = os.path.basename(file_path)
     file_size = os.path.getsize(file_path)
-    total_chunks = (file_size + CHUNK_SIZE - 1) // CHUNK_SIZE
-    threads = min(8, total_chunks)
+    total_chunks = chunk_count(file_size, CHUNK_SIZE)
+    threads = min(8, max(1, total_chunks))
+    transfer_id, bitmap = request_resume_bitmap(
+        file_path, password, server_ip, server_port, preset_code
+    )
+    received_bytes = received_bytes_from_bitmap(bitmap, file_size, CHUNK_SIZE)
+    missing_chunks = list_missing_chunks(bitmap, total_chunks)
 
     print(f"\n📤 Sending {filename}")
     print(f"📦 Total chunks: {total_chunks}, Threads: {threads}")
+    print(f"🧭 Transfer ID: {transfer_id}")
+    if received_bytes:
+        print(f"♻️  Receiver already has {received_bytes} bytes")
 
-    progress = tqdm.tqdm(total=file_size, unit="B", unit_scale=True, unit_divisor=1024)
-    bytes_sent = 0
-    failed_chunks = []
+    progress = tqdm.tqdm(
+        total=file_size,
+        unit="B",
+        unit_scale=True,
+        unit_divisor=1024,
+        initial=received_bytes,
+    )
 
-    with ThreadPoolExecutor(max_workers=threads) as executor:
-        futures = {
-            executor.submit(
-                send_chunk,
-                file_path,
-                password,
-                server_ip,
-                server_port,
-                preset_code,
-                filename,
-                chunk_id,
-                chunk_id * CHUNK_SIZE,
-                min(CHUNK_SIZE, file_size - (chunk_id * CHUNK_SIZE)),
-                total_chunks,
-            ): chunk_id
-            for chunk_id in range(total_chunks)
-        }
+    try:
+        resume_round = 0
 
-        try:
-            for future in as_completed(futures):
-                chunk_id = futures[future]
-                sent_now = future.result()
-                if sent_now:
-                    bytes_sent += sent_now
-                    progress.update(sent_now)
-                else:
-                    failed_chunks.append(chunk_id)
-        except KeyboardInterrupt:
-            print("\n🛑 Cancelled by user. Waiting for active chunk sends to finish...")
-        finally:
-            progress.close()
+        while missing_chunks and resume_round < MAX_RESUME_ROUNDS:
+            print(
+                f"📦 Resuming {len(missing_chunks)} missing chunks (round {resume_round + 1})"
+            )
+            bytes_sent = 0
+            failed_chunks = []
 
-    if failed_chunks:
-        print(f"❌ Failed chunks: {sorted(failed_chunks)}")
-        print(f"⚠️  File {filename} not fully sent.")
-        return False
+            with ThreadPoolExecutor(max_workers=threads) as executor:
+                futures = {
+                    executor.submit(
+                        send_chunk,
+                        file_path,
+                        password,
+                        server_ip,
+                        server_port,
+                        preset_code,
+                        filename,
+                        file_size,
+                        total_chunks,
+                        transfer_id,
+                        chunk_id,
+                        chunk_offset(chunk_id, CHUNK_SIZE),
+                        chunk_size_for_id(file_size, CHUNK_SIZE, chunk_id),
+                    ): chunk_id
+                    for chunk_id in missing_chunks
+                }
 
-    print(f"✅ File {filename} sent successfully ({bytes_sent} bytes).")
+                try:
+                    for future in as_completed(futures):
+                        chunk_id = futures[future]
+                        sent_now = future.result()
+                        if sent_now:
+                            bytes_sent += sent_now
+                            progress.update(sent_now)
+                        else:
+                            failed_chunks.append(chunk_id)
+                except KeyboardInterrupt:
+                    print(
+                        "\n🛑 Cancelled by user. Waiting for active chunk sends to finish..."
+                    )
+
+            if failed_chunks:
+                refreshed_transfer_id, bitmap = request_resume_bitmap(
+                    file_path, password, server_ip, server_port, preset_code
+                )
+                if refreshed_transfer_id != transfer_id:
+                    transfer_id = refreshed_transfer_id
+
+                current_received = received_bytes_from_bitmap(
+                    bitmap, file_size, CHUNK_SIZE
+                )
+                if current_received > progress.n:
+                    progress.update(current_received - progress.n)
+
+                missing_chunks = list_missing_chunks(bitmap, total_chunks)
+                resume_round += 1
+
+                if not missing_chunks:
+                    break
+
+                print(f"⚠️  Pending retries for chunks: {sorted(set(failed_chunks))}")
+            else:
+                missing_chunks = []
+                break
+
+        if missing_chunks:
+            print(
+                f"❌ Failed chunks after resume attempts: {missing_chunks[:10]}"
+                + (" ..." if len(missing_chunks) > 10 else "")
+            )
+            print(f"⚠️  File {filename} not fully sent.")
+            return False
+
+    finally:
+        progress.close()
+
+    print(f"✅ File {filename} sent successfully ({file_size} bytes).")
     return True
 
 
@@ -186,7 +279,8 @@ def pick_file():
     )
     result = subprocess.run(
         [sys.executable, "-c", code],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     return result.stdout.strip()
 

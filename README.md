@@ -31,9 +31,9 @@ This project is a Computer Networks (CN) course project that implements secure f
    - Encrypt/send files in chunks instead of loading entire file into memory.
    - Enable large file support and lower RAM usage.
 
-- Resume interrupted transfers
-   - Track byte offsets.
-   - Allow sender to resume from last acknowledged chunk.
+- ✅ Resume interrupted transfers
+   - Track byte offsets with chunk manifests.
+   - Use receiver-side bitmaps so the sender resumes only missing chunks.
 
 - ✅ Add configurable socket timeouts
    - Prevent hanging connections.
