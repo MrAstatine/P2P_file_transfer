@@ -29,6 +29,7 @@ from transfer_resume import (
     recv_uint32,
     send_transfer_metadata,
 )
+from transfer_security import current_timestamp, generate_session_id
 
 CHUNK_SIZE = DEFAULT_CHUNK_SIZE
 MAX_RETRIES = 3
@@ -70,6 +71,8 @@ def request_resume_bitmap(file_path, password, server_ip, server_port, preset_co
     file_size = os.path.getsize(file_path)
     total_chunks = chunk_count(file_size, CHUNK_SIZE)
     transfer_id = build_transfer_id(file_path, file_size, CHUNK_SIZE)
+    session_id = generate_session_id()
+    session_started_at = current_timestamp()
 
     client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -80,12 +83,19 @@ def request_resume_bitmap(file_path, password, server_ip, server_port, preset_co
 
         client.sendall(RESUME_QUERY)
         send_transfer_metadata(
-            client, filename, file_size, CHUNK_SIZE, total_chunks, transfer_id
+            client,
+            filename,
+            file_size,
+            CHUNK_SIZE,
+            total_chunks,
+            transfer_id,
+            session_id,
+            session_started_at,
         )
 
         bitmap_length = recv_uint32(client)
         bitmap = bytearray(recv_exact(client, bitmap_length))
-        return transfer_id, bitmap
+        return transfer_id, session_id, session_started_at, bitmap
     finally:
         client.close()
 
@@ -100,6 +110,8 @@ def send_chunk(
     file_size,
     total_chunks,
     transfer_id,
+    session_id,
+    session_started_at,
     chunk_id,
     offset,
     size,
@@ -116,7 +128,14 @@ def send_chunk(
 
             client.sendall(CHUNK_DATA)
             send_transfer_metadata(
-                client, filename, file_size, CHUNK_SIZE, total_chunks, transfer_id
+                client,
+                filename,
+                file_size,
+                CHUNK_SIZE,
+                total_chunks,
+                transfer_id,
+                session_id,
+                session_started_at,
             )
             client.sendall(struct.pack("!I", chunk_id))
 
@@ -166,7 +185,7 @@ def send_file(file_path, password, server_ip, server_port, preset_code):
     file_size = os.path.getsize(file_path)
     total_chunks = chunk_count(file_size, CHUNK_SIZE)
     threads = min(8, max(1, total_chunks))
-    transfer_id, bitmap = request_resume_bitmap(
+    transfer_id, session_id, session_started_at, bitmap = request_resume_bitmap(
         file_path, password, server_ip, server_port, preset_code
     )
     received_bytes = received_bytes_from_bitmap(bitmap, file_size, CHUNK_SIZE)
@@ -209,6 +228,8 @@ def send_file(file_path, password, server_ip, server_port, preset_code):
                         file_size,
                         total_chunks,
                         transfer_id,
+                        session_id,
+                        session_started_at,
                         chunk_id,
                         chunk_offset(chunk_id, CHUNK_SIZE),
                         chunk_size_for_id(file_size, CHUNK_SIZE, chunk_id),

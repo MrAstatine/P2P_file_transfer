@@ -36,6 +36,10 @@ from transfer_resume import (
     update_manifest_bitmap,
     bitmap_mark_chunk,
 )
+from transfer_security import (
+    mark_session_completed,
+    register_or_reject_session,
+)
 
 lock = threading.Lock()
 password_global = None
@@ -115,6 +119,18 @@ def _load_or_create_manifest(save_dir, metadata):
     return manifest, manifest_bitmap(manifest)
 
 
+def _security_metadata(metadata):
+    return {
+        "transfer_id": metadata["transfer_id"],
+        "filename": metadata["filename"],
+        "file_size": metadata["file_size"],
+        "chunk_size": metadata["chunk_size"],
+        "total_chunks": metadata["total_chunks"],
+        "session_id": metadata["session_id"],
+        "session_started_at": metadata["session_ts"],
+    }
+
+
 def _prompt_password(filename):
     global password_global
     with lock:
@@ -126,6 +142,12 @@ def _prompt_password(filename):
 def handle_resume_query(client, save_dir):
     metadata = recv_transfer_metadata(client)
     _record_activity(metadata["transfer_id"])
+
+    allowed, reason, _, _ = register_or_reject_session(
+        save_dir, _security_metadata(metadata)
+    )
+    if not allowed:
+        raise ValueError(f"Rejected resume session: {reason}")
 
     manifest, bitmap = _load_or_create_manifest(save_dir, metadata)
     if len(bitmap) == 0 and manifest["total_chunks"]:
@@ -146,6 +168,12 @@ def handle_resume_query(client, save_dir):
 def handle_chunk_data(client, save_dir):
     metadata = recv_transfer_metadata(client)
     _record_activity(metadata["transfer_id"])
+
+    allowed, reason, _, _ = register_or_reject_session(
+        save_dir, _security_metadata(metadata)
+    )
+    if not allowed:
+        raise ValueError(f"Rejected chunk session: {reason}")
 
     chunk_id = recv_uint32(client)
     if chunk_id >= metadata["total_chunks"]:
@@ -190,6 +218,7 @@ def handle_chunk_data(client, save_dir):
         if bitmap_all_set(bitmap, manifest["total_chunks"]):
             os.replace(manifest["part_path"], manifest["final_path"])
             finalize_manifest(save_dir, manifest, bitmap)
+            mark_session_completed(save_dir, _security_metadata(metadata))
 
             global transfer_completed
             transfer_completed = True

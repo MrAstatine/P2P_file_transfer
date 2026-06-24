@@ -1,0 +1,10 @@
+{
+  "5a66888a428f6d0c2c9abbeaa3157208": {
+    "completed_at": 1782322672,
+    "fingerprint": "3561e123e93bb50d495cec3fdab9f979|test_file.txt|299|4194304|1",
+    "last_seen_at": 1782322672,
+    "session_id": "5a66888a428f6d0c2c9abbeaa3157208",
+    "started_at": 1782322653,
+    "status": "completed"
+  }
+}

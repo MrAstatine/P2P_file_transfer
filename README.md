@@ -14,7 +14,7 @@ This project is a Computer Networks (CN) course project that implements secure f
    - Perform a small encrypted challenge-response before sending full file.
    - Prevent wasting bandwidth on wrong passwords.
 
-- Implement replay-attack protection
+- ✅ Implement replay-attack protection
    - Add per-session IDs or timestamps.
    - Reject reused nonces or duplicated sessions.
 

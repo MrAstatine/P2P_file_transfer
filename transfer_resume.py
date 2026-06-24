@@ -48,13 +48,22 @@ def recv_blob(sock):
 
 
 def send_transfer_metadata(
-    sock, filename, file_size, chunk_size, total_chunks, transfer_id
+    sock,
+    filename,
+    file_size,
+    chunk_size,
+    total_chunks,
+    transfer_id,
+    session_id,
+    session_ts,
 ):
     send_blob(sock, filename.encode("utf-8"))
     send_uint64(sock, file_size)
     send_uint32(sock, chunk_size)
     send_uint32(sock, total_chunks)
     send_blob(sock, transfer_id.encode("ascii"))
+    send_blob(sock, session_id.encode("ascii"))
+    send_uint64(sock, session_ts)
 
 
 def recv_transfer_metadata(sock):
@@ -63,12 +72,16 @@ def recv_transfer_metadata(sock):
     chunk_size = recv_uint32(sock)
     total_chunks = recv_uint32(sock)
     transfer_id = recv_blob(sock).decode("ascii")
+    session_id = recv_blob(sock).decode("ascii")
+    session_ts = recv_uint64(sock)
     return {
         "filename": filename,
         "file_size": file_size,
         "chunk_size": chunk_size,
         "total_chunks": total_chunks,
         "transfer_id": transfer_id,
+        "session_id": session_id,
+        "session_ts": session_ts,
     }
 
 
