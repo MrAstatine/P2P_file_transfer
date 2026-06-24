@@ -16,3 +16,5 @@ chunk level resuming done
 test again.
 
 replay protection done
+
+added rate throttling

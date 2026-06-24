@@ -18,7 +18,7 @@ This project is a Computer Networks (CN) course project that implements secure f
    - Add per-session IDs or timestamps.
    - Reject reused nonces or duplicated sessions.
 
-- Rate-limit authentication attempts
+- ✅ Rate-limit authentication attempts
    - Prevent brute-forcing the preset authentication code.
 
 ### 🌐 Networking Enhancements

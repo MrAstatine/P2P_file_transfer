@@ -6,5 +6,13 @@
     "session_id": "5a66888a428f6d0c2c9abbeaa3157208",
     "started_at": 1782322653,
     "status": "completed"
+  },
+  "830b930703188220f147ac10a90ee246": {
+    "completed_at": 1782323101,
+    "fingerprint": "6ad6fd6aa19d2e83fa1e29922934887f|test_file.txt|322|4194304|1",
+    "last_seen_at": 1782323101,
+    "session_id": "830b930703188220f147ac10a90ee246",
+    "started_at": 1782323097,
+    "status": "completed"
   }
 }

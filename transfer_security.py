@@ -2,11 +2,19 @@ import json
 import os
 import secrets
 import time
+import threading
 
 SECURITY_DIR_NAME = ".p2p_security"
 SESSION_CACHE_FILE = "session_cache.json"
+AUTH_THROTTLE_FILE = "auth_throttle.json"
 SESSION_FRESHNESS_WINDOW_SECONDS = 15 * 60
 SESSION_COMPLETED_RETENTION_SECONDS = 24 * 60 * 60
+AUTH_FAILURE_WINDOW_SECONDS = 5 * 60
+AUTH_FAILURE_THRESHOLD = 5
+AUTH_BLOCK_SECONDS = 10 * 60
+AUTH_RECORD_RETENTION_SECONDS = 24 * 60 * 60
+
+_cache_lock = threading.Lock()
 
 
 def generate_session_id():
@@ -39,6 +47,111 @@ def save_session_cache(base_dir, cache):
     path = cache_path(base_dir)
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(cache, handle, indent=2, sort_keys=True)
+
+
+def auth_throttle_path(base_dir):
+    return os.path.join(security_directory(base_dir), AUTH_THROTTLE_FILE)
+
+
+def load_auth_throttle_cache(base_dir):
+    path = auth_throttle_path(base_dir)
+    if not os.path.exists(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def save_auth_throttle_cache(base_dir, cache):
+    path = auth_throttle_path(base_dir)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(cache, handle, indent=2, sort_keys=True)
+
+
+def _prune_auth_history(record, now):
+    failures = record.get("failures", [])
+    record["failures"] = [
+        ts for ts in failures if (now - ts) <= AUTH_FAILURE_WINDOW_SECONDS
+    ]
+    last_seen_at = record.get("last_seen_at")
+    if (
+        last_seen_at is not None
+        and (now - last_seen_at) > AUTH_RECORD_RETENTION_SECONDS
+    ):
+        return None
+    return record
+
+
+def can_attempt_auth(base_dir, peer_ip):
+    """Return (allowed, reason)."""
+    with _cache_lock:
+        cache = load_auth_throttle_cache(base_dir)
+        now = current_timestamp()
+        record = cache.get(peer_ip)
+
+        if record is None:
+            return True, None
+
+        record = _prune_auth_history(record, now)
+        if record is None:
+            cache.pop(peer_ip, None)
+            save_auth_throttle_cache(base_dir, cache)
+            return True, None
+
+        blocked_until = record.get("blocked_until") or 0
+        if blocked_until > now:
+            return False, f"blocked until {blocked_until}"
+
+        cache[peer_ip] = record
+        save_auth_throttle_cache(base_dir, cache)
+        return True, None
+
+
+def record_auth_failure(base_dir, peer_ip):
+    with _cache_lock:
+        cache = load_auth_throttle_cache(base_dir)
+        now = current_timestamp()
+        record = cache.get(peer_ip, {"failures": []})
+        record.setdefault("failures", [])
+        record["failures"] = [
+            ts for ts in record["failures"] if (now - ts) <= AUTH_FAILURE_WINDOW_SECONDS
+        ]
+        record["failures"].append(now)
+        record["last_seen_at"] = now
+
+        if len(record["failures"]) >= AUTH_FAILURE_THRESHOLD:
+            record["blocked_until"] = now + AUTH_BLOCK_SECONDS
+
+        cache[peer_ip] = record
+        save_auth_throttle_cache(base_dir, cache)
+
+
+def record_auth_success(base_dir, peer_ip):
+    with _cache_lock:
+        cache = load_auth_throttle_cache(base_dir)
+        if peer_ip in cache:
+            cache.pop(peer_ip, None)
+            save_auth_throttle_cache(base_dir, cache)
+
+
+def cleanup_auth_throttle_cache(base_dir):
+    with _cache_lock:
+        cache = load_auth_throttle_cache(base_dir)
+        now = current_timestamp()
+        removed = []
+        for peer_ip, record in list(cache.items()):
+            record = _prune_auth_history(record, now)
+            if record is None:
+                removed.append(peer_ip)
+                continue
+            if (record.get("blocked_until") or 0) <= now and not record.get("failures"):
+                removed.append(peer_ip)
+                continue
+            cache[peer_ip] = record
+
+        for peer_ip in removed:
+            cache.pop(peer_ip, None)
+
+        save_auth_throttle_cache(base_dir, cache)
 
 
 def session_fingerprint(metadata):

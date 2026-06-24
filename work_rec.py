@@ -37,6 +37,9 @@ from transfer_resume import (
     bitmap_mark_chunk,
 )
 from transfer_security import (
+    can_attempt_auth,
+    record_auth_failure,
+    record_auth_success,
     mark_session_completed,
     register_or_reject_session,
 )
@@ -232,10 +235,19 @@ def handle_chunk_data(client, save_dir):
 def receive_connection(client, preset_code, save_dir):
     try:
         client.settimeout(10)
+        peer_ip = client.getpeername()[0]
+
+        allowed, reason = can_attempt_auth(save_dir, peer_ip)
+        if not allowed:
+            print(f"🚫 Auth rate limit for {peer_ip}: {reason}")
+            return
 
         if not authenticate_sender(client, preset_code):
+            record_auth_failure(save_dir, peer_ip)
             print("❌ Authentication failed for chunk connection")
             return
+
+        record_auth_success(save_dir, peer_ip)
 
         command = recv_exact(client, 1)
         if command == RESUME_QUERY:
